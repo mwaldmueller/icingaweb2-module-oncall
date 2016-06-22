@@ -3,82 +3,203 @@
 namespace Icinga\Module\Oncall\Forms;
 
 use Exception;
+use Icinga\Application\Config;
+use Icinga\Exception\ConfigurationError;
+use Icinga\Module\Director\Cli\Command;
 use Icinga\Module\Monitoring\Backend\MonitoringBackend;
 use Icinga\Module\Monitoring\Command\Transport\CommandTransport;
+use Icinga\Module\Monitoring\Command\Transport\LocalCommandFile;
+use Icinga\Util\File;
 use Icinga\Web\Form;
 use Icinga\Web\Notification;
 
 class OncallForm extends Form
 {
-    const ONCALL_USER = 'icingaadmin';
+    /**
+     * The monitoring backend
+     *
+     * @var \Icinga\Module\Monitoring\Backend\MonitoringBackend
+     */
+    protected $backend;
+
+    /**
+     * The OnCall module configuration
+     *
+     * @var Config
+     */
+    protected $config;
 
     protected $contacts;
 
-    protected $onCallUser;
+    protected $contactSearchPattern;
+
+    protected $onCallUsername;
 
     protected $actualOnCallUser;
 
+    protected $onCallUser;
+
     public function init()
     {
-        $this->setName('form_oncall');
-    	$this->setSubmitLabel($this->translate('Save Changes'));
-    
-    	$this->onCallUser = MonitoringBackend::instance()->select()->from('contact', array(
-        	'contact_name',
-        	'contact_alias',
-        	'contact_pager'
-    	))->where('contact_name', static::ONCALL_USER)->fetchRow();
+        $this->setSubmitLabel($this->translate('Save Changes'));
 
-    	$contacts = array();
+        $this->onCallUser = $this->getBackend()->select()->from('contact', array(
+            'contact_name',
+            'contact_alias',
+            'contact_pager'
+        ))->where('contact_name', $this->getOnCallUsername())->fetchRow();
 
-    	$query = MonitoringBackend::instance()->select()->from('contact', array(
-        	'contact_name',
-        	'contact_alias',
-        	'contact_pager'
-    	));
+        if ($this->onCallUser === false) {
+            throw new ConfigurationError('No OnCall user w/ name %s found', $this->getOnCallUsername());
+        }
 
-    	$query->where('contact_name', 'test*');
+        $contacts = array();
 
-        foreach($query as $contact) {
-        	$contacts[$contact->contact_name] = $contact;
-        	if ($this->onCallUser !== null
-        	    && $contact->contact_pager === $this->onCallUser->contact_pager
-        	) {
-        	    $this->actualOnCallUser = $contact;
-        	}
-    	}
-    	$this->contacts = $contacts;
+        $query = $this->getBackend()->select()->from('contact', array(
+            'contact_name',
+            'contact_alias',
+            'contact_pager'
+        ));
+        $query->where('contact_name', $this->getContactSearchPattern());
+
+        foreach ($query as $contact) {
+            $contacts[$contact->contact_name] = $contact;
+        }
+        $this->contacts = $contacts;
     }
 
     public function createElements(array $formData)
     {
-    	$this->addElement(
-        	'radio',
-        	'oncall',
-        	array (
-            		'multiOptions'	=> array_combine(array_keys($this->contacts), array_keys($this->contacts)),
-            		'value'		=> $this->actualOnCallUser !== null ? $this->actualOnCallUser->contact_name : null
-        	)
-    	);
+        $this->addElement(
+            'radio',
+            'oncall',
+            array (
+                'multiOptions'  => array_combine(
+                    array_keys($this->contacts), array_keys($this->contacts)
+                ),
+                'value'         => $this->getModuleConfig()->get('oncall', 'active_username')
+            )
+        );
     }
 
+    /**
+     * Update pager number of the OnCall user
+     *
+     * @throws ConfigurationError   If no local command transport configured
+     */
     public function onSuccess()
     {
-    	$contactName = $this->getElement('oncall')->getValue();
-    	$contact = $this->contacts[$contactName];
-    	$pathToCmdFile = CommandTransport::first()->getPath();
+        $commandFilePath = null;
+        foreach (CommandTransport::getConfig() as $name => $config) {
+            if ($config->transport === LocalCommandFile::TRANSPORT || empty($config->transport)) {
+                $commandFilePath = $config->path;
+                break;
+            }
+        }
+        if ($commandFilePath === null) {
+            throw new ConfigurationError('No local command transport found');
+        }
 
-    	$command1 = sprintf('[%u] CHANGE_CUSTOM_USER_VAR;%s;pager;%s', time(), static::ONCALL_USER, $contact->contact_pager) . "\n";
-    	//$command2=
-    
-	$fp = fopen($pathToCmdFile, 'w');
+        $contactName = $this->getElement('oncall')->getValue();
+        $contact = $this->contacts[$contactName];
 
-	fwrite($fp, $command1);
-	//fwrite($fp, $command2);
+        $commandString1 = sprintf(
+                '[%u] CHANGE_CUSTOM_USER_VAR;%s;pager;%s',
+                time(),
+                $this->getOnCallUsername(),
+                $contact->contact_pager
+        );
 
-	fflush($fp);
-	fclose($fp);
+        $commandFile = new File($commandFilePath, 'wn');
+        $commandFile->fwrite($commandString1 . "\n");
 
-	Notification::success('Change OnCall user...');
+        $config = $this->getModuleConfig();
+        $configSection = $config->getSection('oncall');
+        $configSection->active_username = $contactName;
+        $config->saveIni();
+
+        Notification::success('OnCall user changed');
     }
+
+    /**
+     * @return mixed
+     */
+    public function getBackend()
+    {
+        return $this->backend;
+    }
+
+    /**
+     * @param mixed $backend
+     * @return OncallForm
+     */
+    public function setBackend($backend)
+    {
+        $this->backend = $backend;
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getContactSearchPattern()
+    {
+        return $this->contactSearchPattern;
+    }
+
+    /**
+     * @param mixed $contactSearchPattern
+     */
+    public function setContactSearchPattern($contactSearchPattern)
+    {
+        $this->contactSearchPattern = $contactSearchPattern;
+    }
+
+    /**
+     * Get the OnCall module configuration
+     *
+     * @return  Config
+     */
+    public function getModuleConfig()
+    {
+        return $this->config;
+    }
+
+    /**
+     * Set the OnCall module configuration
+     *
+     * @param   Config  $config
+     *
+     * @return  $this
+     */
+    public function setModuleConfig(Config $config)
+    {
+        $this->config = $config;
+        return $this;
+    }
+
+    /**
+     * Get the OnCall username
+     *
+     * @return string
+     */
+    public function getOnCallUsername()
+    {
+        return $this->onCallUsername;
+    }
+
+    /**
+     * Set the OnCall username
+     *
+     * @param   string  $onCallUsername
+     *
+     * @return  $this
+     */
+    public function setOnCallUsername($onCallUsername)
+    {
+        $this->onCallUsername = $onCallUsername;
+        return $this;
+    }
+
+
 }
