@@ -1,4 +1,4 @@
 Module: oncall
-Version: 0.0.1
+Version: 1.0.0
 Description: OnCall module
  This module changes the pager number of an OnCall user for emergency services.

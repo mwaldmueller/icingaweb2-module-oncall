@@ -1,6 +1,6 @@
 # OnCall - Icinga Web 2 module
 
-Icinga Web 2 Module that changes the pager number of an OnCall user for emergency services.
+Icinga Web 2 module that changes the pager number of an OnCall user for emergency services.
 
 ## Installation
 
